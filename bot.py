@@ -62,8 +62,10 @@ async def get_game_full_data(session, universe_id):
     game_url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
     try:
         async with session.get(dev_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            dev_status = resp.status
             dev_data = await resp.json()
         async with session.get(game_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            game_status = resp.status
             game_data = await resp.json()
 
         name = dev_data.get("name", f"Game {universe_id}")
@@ -80,9 +82,33 @@ async def get_game_full_data(session, universe_id):
             players = entry.get("playing", 0)
         if removed and (name == "[TITLE UNAVAILABLE]" or not name):
             name = f"Game {universe_id}"
+
+        if not status:
+            reasons = []
+            if dev_status != 200:
+                reasons.append(f"develop API HTTP {dev_status}, errors={dev_data.get('errors')}")
+            if game_status != 200:
+                reasons.append(f"games API HTTP {game_status}, errors={game_data.get('errors')}")
+            if "isActive" not in dev_data:
+                reasons.append("isActive missing in develop response (default False used)")
+            elif not is_active:
+                reasons.append("isActive=False")
+            if "privacyType" not in dev_data:
+                reasons.append("privacyType missing in develop response (default Private used)")
+            elif privacy != "Public":
+                reasons.append(f"privacyType={privacy!r}")
+            if not has_game_data:
+                reasons.append("games API returned empty data (not in public listing)")
+            if removed:
+                reasons.append(
+                    f"is_place_removed=True (id={entry.get('id')}, name={entry.get('name')!r}, "
+                    f"creator={entry.get('creator')}, created={entry.get('created')})"
+                )
+            print(f"[DOWN] universe {universe_id} ({name}): " + " | ".join(reasons))
+
         return name, status, players, link
     except Exception as e:
-        print(f"Error fetching game {universe_id}: {e}")
+        print(f"[DOWN] universe {universe_id}: exception {type(e).__name__}: {e}")
         return f"Game {universe_id}", False, 0, None
 
 
@@ -101,37 +127,44 @@ async def get_group_data(session, group_id):
 
 
 def build_message_from_cache() -> list[str]:
-    now = int(time.time())
     combined = list(zip(UNIVERSE_IDS, cached_games))
     combined.sort(key=lambda x: x[1][2], reverse=True)
     total_online = sum(r[2] for _, r in combined)
 
-    lines = ["## ** OUR GAMES **"]
+    games_header = "OUR GAMES" if len(combined) > 1 else "OUR GAME"
+    lines = [f"## **{games_header} **"]
+
     for uid, (name, status, players, link) in combined:
         icon = "🟢" if status else "🔴"
         status_text = "Active" if status else "Deleted"
+        game_link = link or f"https://www.roblox.com/games/{uid}"
         lines.append(
-            f"**{name}**\n"
-            f"> * Game Status: {status_text} {icon}\n"
-            f"> * Online: {players} 👥\n"
-            f"[JOIN GAME](<{link}>) 👈\n"
+            f"***{name}***\n"
+            f"> -# Game Status: {status_text} {icon}\n"
+            f"> -# Online: {players} 👥\n"
+            f"[__**JOIN GAME**__](<{game_link}>) \n"
         )
-    lines.append(f"**Total Online: {total_online} 👥**\n")
 
-    group_lines = []
-    for gid, (group_name, member_count, is_locked) in zip(GROUP_IDS, cached_groups):
-        if not is_locked:
+    lines.append(f"-# **Total Online: {total_online}** 👥\n")
+
+    valid_groups = [(gid, g) for gid, g in zip(GROUP_IDS, cached_groups) if not g[2]]
+    if valid_groups:
+        groups_header = "OUR GROUPS" if len(valid_groups) > 1 else "OUR GROUP"
+        total_members = sum(g[1] for _, g in valid_groups)
+        lines.append(f"## **{groups_header}**")
+
+        for gid, (group_name, member_count, is_locked) in valid_groups:
             group_link = f"https://www.roblox.com/groups/{gid}"
-            group_lines.append(
-                f"**{group_name}**\n"
-                f"> * Members: {member_count:,} 👥\n"
-                f"[JOIN GROUP](<{group_link}>) 👈\n"
+            lines.append(
+                f"***{group_name}***\n"
+                f"> -# Members: {member_count:,} 👥\n"
+                f"[__**JOIN GROUP**__](<{group_link}>)\n"
             )
-    if group_lines:
-        lines.append("## \n** OUR GROUPS **")
-        lines.extend(group_lines)
 
-    lines.append(f"\n⏱ Last Update: <t:{now}:R>")
+        lines.append(f"-# **Total Members: {total_members:,}** 👥")
+
+    now = int(time.time())
+    lines.append(f"-# **⏱ Last Update: <t:{now}:R>**")
 
     content = "\n".join(lines)
     chunks = []
